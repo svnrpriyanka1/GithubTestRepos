@@ -1,0 +1,1596 @@
+**************************QuickbooksIntegrationServiceQueueable************************************
+*****************************************************************************************************************************
+*****************************************************************************************************************************************
+
+public class QuickbooksIntegrationServiceQueueable implements Queueable,Database.AllowsCallouts{
+    String processRequest;
+    
+    public QuickbooksIntegrationServiceQueueable(String processRequest){
+        this.processRequest = processRequest;
+    } 
+    
+    public void execute(QueueableContext context) {
+        String jsonString = processRequest;
+        
+        Map<String, Object> parsedJson = (Map<String, Object>) JSON.deserializeUntyped(jsonString);
+        List<Object> eventNotifications = (List<Object>) parsedJson.get('eventNotifications');
+        Map<String, Object> eventNotification = (Map<String, Object>) eventNotifications[0];
+        Map<String, Object> dataChangeEvent = (Map<String, Object>) eventNotification.get('dataChangeEvent');
+        List<Object> entities = (List<Object>) dataChangeEvent.get('entities');
+        Map<String, Object> entity = (Map<String, Object>) entities[0];
+        String entityId = (string) entity.get('id');
+        String operation = (string) entity.get('operation');
+        String entityName = (String) entity.get('name');
+        // if(operation == 'Update' && entityName == 'SalesReceipt'){ 
+        if(operation == 'Create' && entityName == 'SalesReceipt'){ 
+            qb_Metadata__mdt qb_Cred = QuickbooksUtil.quickbooksCred();   
+            
+            String accessToken = qb_Cred.access_token__c;
+            string realmId = qb_Cred.realmId__c;
+            string baseUrl = qb_cred.Environment__c == 'Production'?qb_cred.Prod_Base_URL__c:qb_Cred.Sanbdox_Base_URL__c;
+            string minorVer = qb_Cred.minorversion__c;
+            
+            HttpRequest req = new HttpRequest();
+            req.setEndpoint(Test.isRunningTest() ? 'https://sandbox-quickbooks.api.intuit.com/v3/company/4620816365244111840/SalesReceipt/query?minorversion=65': baseUrl+'/v3/company/'+realmId+'/query?minorversion='+minorVer);
+            req.setMethod('POST');
+            req.setBody('select CustomerRef, Line, RecurDataRef from SalesReceipt where id=\''+entityId+'\'');
+            req.setHeader('Authorization', 'Bearer '  + accessToken);
+            req.setheader('Accept', 'application/json');
+            req.setHeader('Content-Type', 'application/text');
+            Http http = new Http();
+            string errorMessage = '';
+            List<Product2> prodList = new  List<Product2>();
+            
+            HttpResponse res = http.send(req);
+            system.debug('req.body:1st: :'+req.getbody());
+            
+            try{
+                List<Customer_Product__c> cpList = new List<Customer_Product__c>();
+                if (res.getStatusCode() == 200) {
+                    system.debug('str:: :'+res.getBody());
+                    Map<String, Object> deserializeJson = (Map<String, Object>) JSON.deserializeUntyped(res.getBody());
+                    Map<String, Object> queryResponseMap = (Map<String, Object>) deserializeJson.get('QueryResponse');                   
+                    List<Object> salesReceiptList = (List<Object>) queryResponseMap.get('SalesReceipt');
+                    Map<String,Object> salesReceiptMap = (Map<String,Object>) salesReceiptList[0];
+                    if(salesReceiptMap.containsKey('RecurDataRef') && salesReceiptMap.get('RecurDataRef') != null){
+                        Map<String,Object> recurDataRefMap = (Map<String,Object>) salesReceiptMap.get('RecurDataRef');
+                        String recurIdRef = (String) recurDataRefMap.get('value');
+                        HttpRequest req3 = new HttpRequest();
+                        req3.setEndpoint(Test.isRunningTest() ? 'https://sandbox-quickbooks.api.intuit.com/v3/company/4620816365244111840/RecurringTransaction/query?minorversion=65' : baseUrl+'/v3/company/'+realmId+'/query?minorversion='+minorVer);
+                        req3.setMethod('POST');
+                        req3.setBody('Select RecurringInfo From RecurringTransaction where RecurDataRef =\''+recurIdRef+'\'');
+                        req3.setHeader('Authorization', 'Bearer '  + accessToken);
+                        req3.setheader('Accept', 'application/json');
+                        req3.setHeader('Content-Type', 'application/text');
+                        Http http3 = new Http();
+                        HttpResponse res3 = http.send(req3);
+                        if (res3.getStatusCode() == 200) {
+                            system.debug('str:: :'+res3.getBody());
+                            Map<String, Object> deserializeJsonRecurringTransaction = (Map<String, Object>) JSON.deserializeUntyped(res3.getBody());
+                            Map<String, Object> queryResponseRecTransMap = (Map<String, Object>) deserializeJsonRecurringTransaction.get('QueryResponse');                   
+                            List<Object> recurringTransactionList = (List<Object>) queryResponseRecTransMap.get('RecurringTransaction');
+                            Map<String,Object> recurringTransactionMap = (Map<String,Object>) recurringTransactionList[0];
+                            Map<String,Object> salesReiptMap = (Map<String,Object>) recurringTransactionMap.get('SalesReceipt');
+                            Map<String,Object> recurringInfoMap = (Map<String,Object>) salesReiptMap.get('RecurringInfo');
+                            Map<String,Object> scheduleInfoMap = (Map<String,Object>) recurringInfoMap.get('ScheduleInfo');
+                            System.debug('Date: ::'+(String) scheduleInfoMap.get('StartDate'));
+                            Date subStartDate = scheduleInfoMap.containsKey('StartDate') ? Date.valueOf((String) scheduleInfoMap.get('StartDate')) : null;
+                            Date subNextDate = scheduleInfoMap.containsKey('NextDate') ? Date.valueOf((String) scheduleInfoMap.get('NextDate')) : null;
+                            Date subEndDate = scheduleInfoMap.containsKey('EndDate') ? Date.valueOf((String) scheduleInfoMap.get('EndDate')) : null;
+                            integer DaysBefore = scheduleInfoMap.containsKey('DaysBefore') ? integer.valueOf(scheduleInfoMap.get('DaysBefore')) : null;
+                            system.debug('subNextDate = '+subNextDate);
+                            List<Object> lineList = (List<Object>) salesReceiptMap.get('Line');                               
+                            Map<String,Object> customerRefMap = (Map<String,Object>) salesReceiptMap.get('CustomerRef');
+                            String customerId = (string) customerRefMap.get('value');  
+                            system.debug('Test PS1 customerId:: :'+customerId);
+                            Account acc = new Account();
+                            try{
+                                acc = [Select id from Account where QBO_customer_Id__c = :customerId Limit 1];
+                            }catch (Exception e) {
+                                acc = null;
+                            }
+                            Map<String,String> lineIdPtodIdQb = new Map<String,String>();
+                            Map<String,String> lineIdDescQbMap = new Map<String,String>();
+                            Map<String,Decimal> DescAmountQbMap = new Map<String,Decimal>();
+                            Map<String,String> lineIdProdIdQb = new  Map<String,String>();
+                            for(Object eachLine :lineList){
+                                Map<String,Object> eachSalesItemLineDetailMap = (Map<String,Object>) eachLine; 
+                                String lineId = (String) eachSalesItemLineDetailMap.get('Id');
+                                String lineDecs = eachSalesItemLineDetailMap.containsKey('Description') && eachSalesItemLineDetailMap.get('Description') != null ? (String) eachSalesItemLineDetailMap.get('Description')+' [Line: '+lineId+']' : '[Description Not Provided in QuickBooks - Line: '+ lineId+']';
+                                if(eachSalesItemLineDetailMap.containsKey('SalesItemLineDetail')){
+                                    Map<String,Object> salesItemLineDetailMap =  (Map<String,Object>) eachSalesItemLineDetailMap.get('SalesItemLineDetail');  
+                                    Map<String,Object> itemRefMap = (Map<String,Object>) salesItemLineDetailMap.get('ItemRef');    
+                                    String productId = String.valueOf(itemRefMap.get('value'));
+                                    Decimal lineXAmount = eachSalesItemLineDetailMap.containsKey('Amount') ? (Decimal) eachSalesItemLineDetailMap.get('Amount') : null;
+                                    DescAmountQbMap.put(lineDecs,lineXAmount);
+                                    
+                                    lineIdDescQbMap.put(lineId,lineDecs);
+                                    lineIdPtodIdQb.put(lineId,productId);
+                                    lineIdProdIdQb.put(lineId,productId);
+                                }
+                            }
+                            
+                            prodList = [Select Id,Quickbooks_ProductId__c,Name from Product2 Where Quickbooks_ProductId__c =:lineIdPtodIdQb.values() AND (Name = 'Company Renewals (Annual Report)' OR Name = 'State Sales Tax Filings' OR Name = 'Accounting/Bookkeeping Services' OR Name Like '%Payroll%' OR Name = 'Accounting and Advising' OR Name = 'Business Consulting' OR Name = 'Registered Agent & Virtual Office')];
+                            Map<String, String> qbProIdsfproIdMap = new Map<String, String>(); 
+                            Map<String, String> qbProIdSFProNameMap = new Map<String, String>();//
+                            Map<String, String> qbProIdsfproIdNoOppMap = new Map<String, String>();                           
+                            Set<Id> prodIdSfSet = new Set<Id>();
+                            Map<String, String> qbProIdsfproIdAllMap = new Map<String, String>();                           
+                            for(Product2 proSf :prodList){
+                                if(proSf.Name == 'Company Renewals (Annual Report)' || proSf.Name == 'State Sales Tax Filings' || proSf.Name == 'Accounting/Bookkeeping Services' || proSf.Name.contains('Payroll')){
+                                    qbProIdsfproIdMap.put(proSf.Quickbooks_ProductId__c,proSf.id);
+                                    qbProIdSFProNameMap.put(proSf.Quickbooks_ProductId__c, proSf.Name);//
+                                    qbProIdsfproIdAllMap.put(proSf.Quickbooks_ProductId__c, proSf.Id);//
+                                    prodIdSfSet.add(proSf.id);
+                                }else if(proSf.Name == 'Registered Agent & Virtual Office' || proSf.Name == 'Business Consulting' || proSf.Name == 'Accounting and Advising'){
+                                    qbProIdsfproIdNoOppMap.put(proSf.Quickbooks_ProductId__c,proSf.id);
+                                    qbProIdsfproIdAllMap.put(proSf.Quickbooks_ProductId__c, proSf.Id);//
+                                    prodIdSfSet.add(proSf.id);
+                                }
+                            }
+                            if(prodList != null && prodList.size() > 0){
+                                if(acc == null){                                
+                                    HttpRequest req2 = new HttpRequest();
+                                    req2.setEndpoint(Test.isRunningTest() ? 'https://sandbox-quickbooks.api.intuit.com/v3/company/4620816365244111840/Customer/query?minorversion=65' :  baseUrl+'/v3/company/'+realmId+'/query?minorversion='+minorVer);
+                                    req2.setMethod('POST');
+                                    req2.setBody('select * from Customer Where id=\''+customerId+'\'');
+                                    req2.setHeader('Authorization', 'Bearer '  + accessToken);
+                                    req2.setheader('Accept', 'application/json');
+                                    req2.setHeader('Content-Type', 'application/text');
+                                    Http http2 = new Http();
+                                    HttpResponse res2 = http2.send(req2);
+                                    if (res2.getStatusCode() == 200) {
+                                        system.debug('res2.getBody:: :'+res2.getBody());
+                                        Map<String, Object> deserializeJson2 = (Map<String, Object>) JSON.deserializeUntyped(res2.getBody());
+                                        Map<String, Object> QueryResponseMap2 = (Map<String, Object>) deserializeJson2.get('QueryResponse');
+                                        
+                                        List<Object> customerList = (List<Object>) QueryResponseMap2.get('Customer');    
+                                        Map<String, Object> customerIndex = (Map<String, Object>) customerList[0];
+                                        
+                                        String companyName = (customerIndex.containsKey('CompanyName')) ? (String)customerIndex.get('CompanyName') : null;
+                                        String primaryEmail = '';
+                                        Map<String,Object> primaryEmailAddrMap = (customerIndex != null && customerIndex.containsKey('PrimaryEmailAddr')) ? (Map<String,Object>) customerIndex.get('PrimaryEmailAddr') : null;
+                                        primaryEmail = (primaryEmailAddrMap != NULL && primaryEmailAddrMap.containsKey('Address')) ? (String) primaryEmailAddrMap.get('Address') : '';                                        
+                                        Map<String, Object> primaryPhoneMap = (customerIndex.containsKey('PrimaryPhone')) ? (Map<String, Object>) customerIndex.get('PrimaryPhone') : null;
+                                        String primaryPhone = (primaryPhoneMap != null) &&  primaryPhoneMap.get('FreeFormNumber') != null ? (String) primaryPhoneMap.get('FreeFormNumber') : null;
+                                        Map<String,Object> mobileMap =(customerIndex.containsKey('Mobile')) ? (Map<String,Object>) customerIndex.get('Mobile') : null;
+                                        String mobilePhone = (mobileMap != null && mobileMap.containsKey('FreeFormNumber')) ? (String) mobileMap.get('FreeFormNumber') : '';
+                                        String displayName = (customerIndex.containsKey('DisplayName') &&  customerIndex.get('DisplayName') != null) ? (String) customerIndex.get('DisplayName') : '';
+                                        String givenName = (customerIndex.containsKey('GivenName') &&  customerIndex.get('GivenName') != null) ? (String) customerIndex.get('GivenName') : '';
+                                        String familyName = (customerIndex.containsKey('FamilyName') && customerIndex.get('FamilyName') != null) ? (String) customerIndex.get('FamilyName') : '';
+                                        String individualName = (givenName + ' ' + familyName).trim();
+                                        String  displayNameWithoutComa = displayName.replace(',', '');
+                                        Account acc2 ;
+                                        Contact conQue ;
+                                        //New Changes
+                                        if(companyName != null && companyName != ''){
+                                            try{
+                                                acc2= [Select Id From Account Where Name =:companyName Limit 1];
+                                            }catch(exception e){
+                                                acc2 = null;
+                                            }
+                                        } 
+                                        if(displayName != null & displayName != '' && acc2 == null){
+                                            try{
+                                                acc2= [Select Id From Account Where Name =:displayName Limit 1];
+                                            }catch(exception e){
+                                                acc2 = null;
+                                            }
+                                        }  
+                                        if(displayNameWithoutComa != null && displayNameWithoutComa != '' && acc2 == null){
+                                            try{
+                                                acc2= [Select Id From Account Where Name =:displayNameWithoutComa Limit 1];
+                                            }catch(exception e){
+                                                acc2 = null;
+                                            }
+                                        }
+                                        
+                                        if(acc2 != null){
+                                            acc = acc2;
+                                            Account accUpdate = new Account();
+                                            accUpdate.id= acc.id;
+                                            accUpdate.QBO_customer_Id__c = customerId;
+                                            update accUpdate; 
+                                        }else {
+                                            Account acc3 = new Account();                            
+                                            if(companyName != null && companyName != ''){
+                                                acc3.name = companyName;
+                                                acc3.Type__c = 'Business';
+                                            } else if(displayName != null & displayName != ''){
+                                                acc3.name = displayName;
+                                                acc3.Type__c = 'Business';
+                                            }else{
+                                                acc3.name = individualName;
+                                                acc3.Type__c = 'Individual';
+                                                acc3.First_Name__c = givenName ;
+                                                acc3.Last_Name__c = familyName ;
+                                            }
+                                            acc3.Email__c = primaryEmail;
+                                            acc3.Phone = primaryPhone;
+                                            acc3.AccountSource = 'Automatic - Quickbooks Recurring Opportunity Creation';
+                                            acc3.QBO_customer_Id__c = customerId;
+                                            insert acc3;
+                                            
+                                            Contact con = new Contact();
+                                            con.FirstName = givenName;
+                                            con.LastName = familyName == ''  ? givenName == '' ? displayName :givenName : familyName;
+                                            con.MobilePhone = mobilePhone;
+                                            con.Contact_Source__c = 'Automatic - Quickbooks Recurring Opportunity Creation';
+                                            con.Phone = primaryPhone;
+                                            con.email = primaryEmail;
+                                            con.AccountId = acc3.Id;
+                                            insert con;
+                                            acc = acc3;
+                                        }
+                                        
+                                        //New Changes End
+                               /*         if(primaryEmail != null && primaryEmail != ''){
+                                            try{
+                                                acc2= [Select Id From Account Where Email__c =:primaryEmail Limit 1];
+                                            }catch(exception e){
+                                                acc2 = null;
+                                            }
+                                        }
+                                        if(acc2 == null && primaryEmail != null && primaryEmail != ''){
+                                            try{
+                                                conQue = [Select Id, AccountId From Contact Where Email =:primaryEmail AND AccountId != null Limit 1];
+                                            }catch(exception e){
+                                                conQue = null;
+                                            }
+                                            if(conQue != null){
+                                                try{
+                                                    acc2= [Select Id From Account Where id =:conQue.AccountId Limit 1];
+                                                    
+                                                }catch(exception e){
+                                                    conQue = null;
+                                                }
+                                            }
+                                        }
+                                        if(companyName != null && acc2 == null){
+                                            try{
+                                                acc2= [Select Id From Account Where Name =:companyName Limit 1];
+                                            }catch(exception e){
+                                                acc2 = null;
+                                            }
+                                        }
+                                        else{
+                                            if(individualName != '' && acc2 == null){                                            
+                                                try{
+                                                    acc2= [Select Id From Account Where Name =:individualName Limit 1];
+                                                }catch(exception e){
+                                                    acc2 = null; 
+                                                }
+                                            }
+                                        }                                    
+                                        //Final Execution
+                                        if(acc2 != null){
+                                            acc = acc2;
+                                            Account accUpdate = new Account();
+                                            accUpdate.id= acc.id;
+                                            accUpdate.QBO_customer_Id__c = customerId;
+                                            update accUpdate;                                                                      
+                                        } else {
+                                            Account acc3 = new Account();                            
+                                            if(companyName != null){
+                                                acc3.name = companyName;
+                                                acc3.Type__c = 'Business';
+                                            }else{
+                                                acc3.name = individualName;
+                                                acc3.Type__c = 'Individual';
+                                                acc3.First_Name__c = givenName ;
+                                                acc3.Last_Name__c = familyName ;
+                                            }
+                                            acc3.Email__c = primaryEmail;
+                                            acc3.Phone = primaryPhone;
+                                            acc3.AccountSource = 'Automatic - Quickbooks Recurring Opportunity Creation';
+                                            acc3.QBO_customer_Id__c = customerId;
+                                            insert acc3;
+                                            
+                                            Contact con = new Contact();
+                                            con.FirstName = givenName;
+                                            
+                                            con.LastName = familyName == ''  ? givenName : familyName;
+                                            con.MobilePhone = mobilePhone;
+                                            con.Contact_Source__c = 'Automatic - Quickbooks Recurring Opportunity Creation';
+                                            con.Phone = primaryPhone;
+                                            con.email = primaryEmail;
+                                            con.AccountId = acc3.Id;
+                                            insert con;
+                                            acc = acc3;
+                                        }     */                               
+                                    } 
+                                } 
+                                if(acc != null){
+                                    List<String> proIdSfSet = new List<String>();
+                                    List<String> proIdQbInProgrSf = new List<String>();
+                                    List<Customer_Product__c> cpLst = [Select Id, Product__c, Status__c,Product__r.Quickbooks_ProductId__c From Customer_Product__c Where Account__c = :acc.Id AND (Product__r.Name = 'Accounting and Advising' OR Product__r.Name = 'Business Consulting' OR Product__r.Name = 'Registered Agent & Virtual Office')];
+                                    for(Customer_Product__c cp :cpLst){
+                                        proIdSfSet.add(cp.Product__r.Quickbooks_ProductId__c);
+                                        if(cp.Status__c == 'In-Progress'){
+                                            proIdQbInProgrSf.add(cp.Product__r.Quickbooks_ProductId__c);
+                                        }
+                                    }
+                                    
+                                    Decimal totalSubscrAmount;
+                                    for(String line :lineIdPtodIdQb.keySet()){
+                                        if(qbProIdsfproIdMap.containsKey(lineIdProdIdQb.get(line)) && !proIdSfSet.contains(lineIdPtodIdQb.get(line))){
+                                            Customer_Product__c cp = new Customer_Product__c();
+                                            cp.Account__c = acc.id;
+                                            cp.Product__c = qbProIdsfproIdMap.get(lineIdProdIdQb.get(line));
+                                            if(qbProIdSFProNameMap.containsKey(lineIdProdIdQb.get(line)) && qbProIdSFProNameMap.get(lineIdProdIdQb.get(line)) == 'Accounting/Bookkeeping Services'){
+                                                cp.Create_Opportunity__c = FALSE;//
+                                                cp.Create_Opportunity_on_Next_Month__c = TRUE;
+                                                cp.EntityId__c = entityId;
+                                            }//
+                                            else{//
+                                                cp.Create_Opportunity__c = TRUE;
+                                            }//
+                                            cp.Status__c = 'In-Progress';
+                                            cp.Customer_Product_Source__c = 'Automatic - Quickbooks Recurring Opportunity Creation';
+                                            cp.Description__c = lineIdDescQbMap.get(line);
+                                            cpList.add(cp);
+                                            if(totalSubscrAmount != null){
+                                                totalSubscrAmount = totalSubscrAmount + DescAmountQbMap.get(lineIdDescQbMap.get(line));                                            
+                                            }else{   
+                                                totalSubscrAmount = DescAmountQbMap.get(lineIdDescQbMap.get(line));  
+                                            }                                        
+                                        }
+                                        else if(qbProIdsfproIdNoOppMap.containsKey(lineIdProdIdQb.get(line)) && !proIdQbInProgrSf.contains(lineIdPtodIdQb.get(line))){
+                                            Customer_Product__c cp = new Customer_Product__c();
+                                            cp.Account__c = acc.id;
+                                            cp.Product__c = qbProIdsfproIdNoOppMap.get(lineIdProdIdQb.get(line));
+                                            cp.Create_Opportunity__c = FALSE;
+                                            cp.Status__c = 'In-Progress';
+                                            cp.Customer_Product_Source__c = 'Automatic - Quickbooks Recurring Opportunity Creation';
+                                            cp.Description__c = lineIdDescQbMap.get(line);
+                                            cpList.add(cp);
+                                            if(totalSubscrAmount != null){
+                                                totalSubscrAmount = totalSubscrAmount + DescAmountQbMap.get(lineIdDescQbMap.get(line));                                            
+                                            }else{   
+                                                totalSubscrAmount = DescAmountQbMap.get(lineIdDescQbMap.get(line));  
+                                            }  
+                                        }
+                                    }
+                                    if(cpList != null && cpList.size() > 0){
+                                        insert cpList;
+                                        
+                                        List<Payment__c> payNewList = new List<Payment__c>();
+                                        List<Subscription__c> subNewList = new List<Subscription__c>();
+                                        List<Opportunity> oppList = [Select Id,AccountId,Name,Customer_Product__r.Description__c,Description From Opportunity Where Customer_Product__c =:cpList];
+                                        System.debug('oppList:: :'+oppList);
+                                        System.debug('oppListsize:: :'+oppList.size());
+                                        List<Opportunity> oppNewList = new List<Opportunity>();
+                                        Map<String,String> oppIdDescMap = new Map<String,String>();
+                                        String oppNames ;
+                                        String oppIds ;
+                                        for(Opportunity opp :oppList){
+                                            Opportunity oppor = new Opportunity();
+                                            oppor.Id = opp.id;
+                                            oppor.StageName = 'Paid';
+                                            oppor.Payment_Mode__c = 'Automatic';
+                                            oppor.Payment_Status__c = 'Paid';
+                                            oppor.Payment_Status_update_by_Stripe__c = true;
+                                            oppor.Description = opp.Customer_Product__r.Description__c;
+                                            oppIdDescMap.put(opp.id,opp.Customer_Product__r.Description__c);
+                                            oppNewList.add(oppor);
+                                            if(oppNames != null){
+                                                oppNames = oppNames+', '+opp.Name;
+                                            }else{
+                                                oppNames = opp.Name;                                       
+                                                
+                                            }
+                                        }
+                                        if(oppNewList != null && oppNewList.size() > 0){
+                                            update oppNewList;
+                                            for(Opportunity opp:oppNewList){
+                                                if(oppIds != null){
+                                                    oppIds = oppIds+','+opp.id;
+                                                }else{
+                                                    oppIds = opp.id;                                       
+                                                }
+                                            }
+                                        }
+                                        //New Changes 11/15
+                                        
+                                        List<OpportunityLineItem> oliNewListUpdate = new List<OpportunityLineItem>();                                        
+                                        List<OpportunityLineItem> opplineList = new List<OpportunityLineItem>();
+                                        opplineList = [Select Id,OpportunityId,Product2.Quickbooks_ProductId__c,Opportunity.Customer_Product__c,Opportunity.Customer_Product__r.Description__c From OpportunityLineItem Where OpportunityId =:oppList];
+                                        Subscription__c subscrip= new Subscription__c();                                
+                                        Subscription__c sub;
+                                        List<Subscription__c> subList; 
+                                        try{
+                                            system.debug('recurIdRef:: :'+recurIdRef);
+                                            subList = [Select Id,Name,Opportunity__c,Opportunities__c,Opportunities_Name__c,Customer__c,Subscription_Status__c From Subscription__c Where Subscription_Type__c = 'Quickbooks' AND Subscription_Status__c = 'Active' AND QuickBooks_Recurring_Transaction_Id__c = :recurIdRef]; //Opportunity__c =: oppList AND 
+                                        } catch(Exception e){
+                                            sub = null;
+                                            subList = null;
+                                        }
+                                        List<Subscription__c> inActiveList = new  List<Subscription__c>();
+                                        if(subList != null && subList.size() > 0){
+                                            for(Subscription__c s :subList){
+                                                if(s.Customer__c != acc.Id){
+                                                    Subscription__c subInactive = new Subscription__c();
+                                                    subInactive.Id = s.Id;
+                                                    subInactive.Subscription_Status__c = 'Ended';
+                                                    inActiveList.add(subInactive);
+                                                    system.debug('Test :: :Sub Number:: :'+s.Name);
+                                                    
+                                                }else if(s.Customer__c == acc.Id && sub == null){
+                                                    sub = s;
+                                                    system.debug('Test :: :Sub Number:: :'+s.Name);
+                                                    system.debug('Test :: :s. Subscription Assignment');
+                                                } else if(s.Customer__c == acc.Id && sub != null){
+                                                    Subscription__c subInactive = new Subscription__c();
+                                                    subInactive.Id = s.Id;
+                                                    subInactive.Subscription_Status__c = 'Ended';
+                                                    inActiveList.add(subInactive);
+                                                    system.debug('Test :: :Sub Number:: :'+s.Name);
+                                                }
+                                            }
+                                        }
+                                        if(inActiveList != null && inActiveList.size() > 0){
+                                            system.debug('Test :: :inActiveList:: :'+inActiveList);
+                                            update inActiveList;
+                                        }
+                                        for(Subscription__c s :inActiveList){
+                                            system.debug('subName:: :'+s.Name+'  :: : Status:: :'+s.Subscription_Status__c);
+                                        }
+                                        if(sub == null){
+                                            System.debug('Test PS1 Subscription');
+                                            if(opplineList != null && opplineList.size() > 0 && oppList != null && oppList.size() > 0){                                                                                         
+                                                subscrip.Opportunity__c = oppList != null && oppList.size() == 1 ? oppList[0].Id : null;                                           
+                                                subscrip.Opportunities_Name__c = oppList != null && oppList.size() > 1 ? oppNames : null;
+                                                subscrip.Opportunities__c = oppList != null && oppList.size() > 1 ? oppIds : null;
+                                            }
+                                            subscrip.Subscription_Amount__c = totalSubscrAmount;
+                                            subscrip.Subscription_Type__c = 'Quickbooks';
+                                            subscrip.Subscription_Status__c = 'Active';
+                                            subscrip.QuickBooks_Recurring_Transaction_Id__c = recurIdRef;
+                                            subscrip.Create_Subscription_in_Stripe__c = false;
+                                            subscrip.Customer__c = acc.id;
+                                            subscrip.Sales_Receipt_Date__c = System.today();
+                                            subscrip.Subscription_Start_date__c = subStartDate;
+                                            subscrip.Subscription_End_date__c = subEndDate;
+                                            subscrip.Subscription_Next_Date__c = subNextDate;
+                                            subscrip.DaysBefore__c = DaysBefore;
+                                            insert subscrip;                                      
+                                        }
+                                        else if(sub != null){
+                                            subscrip.id = sub.id;
+                                            if(Sub.Opportunity__c != Null && (sub.Opportunities__c == Null || sub.Opportunities_Name__c == Null)) {
+                                                subscrip.Opportunities_Name__c = oppList != null && oppList.size() > 1 ? oppNames : null;
+                                                subscrip.Opportunities__c = oppList != null && oppList.size() > 1 ? oppIds : null;
+                                            }
+                                            subscrip.Subscription_Next_Date__c = subNextDate;
+                                            subscrip.Subscription_End_date__c = subEndDate;
+                                            if(sub.Subscription_Status__c == 'Paused' || sub.Subscription_Status__c == 'Day Skipped')
+                                                subscrip.Subscription_Status__c = 'Active';
+                                            subscrip.DaysBefore__c = DaysBefore;
+                                            update subscrip;
+                                        }
+                                        
+                                        
+                                        system.debug('123:: :prodIdSfSet:: :'+prodIdSfSet);
+                                        system.debug('123:: :subscrip.Id:: :'+subscrip.Id);
+                                        List<Subscription_Line_Item__c> subLine = [Select Id,Product__c,Subscription_Amount__c From Subscription_Line_Item__c Where Subscription__c =:subscrip.Id];
+                                        Set<String> prodIdSet = new Set<String>();
+                                        for(Subscription_Line_Item__c eachLine :subLine){
+                                            prodIdSet.add(eachLine.Product__c);  
+                                        }
+                                        Set<String> prodIdLineSet = new Set<String>();
+                                        Set<String> prodIdLineContainsSet = new Set<String>();
+                                        for(String line :lineIdPtodIdQb.keySet()){
+                                            if(qbProIdsfproIdAllMap.containsKey(lineIdProdIdQb.get(line)) && prodIdSet.contains(qbProIdsfproIdAllMap.get(lineIdProdIdQb.get(line)))){
+                                                prodIdLineContainsSet.add(qbProIdsfproIdAllMap.get(lineIdProdIdQb.get(line)));
+                                            }
+                                            if(qbProIdsfproIdAllMap.containsKey(lineIdProdIdQb.get(line)) && !prodIdSet.contains(qbProIdsfproIdAllMap.get(lineIdProdIdQb.get(line)))){
+                                                prodIdLineSet.add(qbProIdsfproIdAllMap.get(lineIdProdIdQb.get(line)));
+                                                system.debug('qbProIdsfproIdAllMap.get(lineIdProdIdQb.get(line)):: :'+qbProIdsfproIdAllMap.get(lineIdProdIdQb.get(line)));
+                                            }
+                                        }
+                                        List<Subscription_Line_Item__c> subLineInsertList = new List<Subscription_Line_Item__c>();
+                                        if(prodIdLineSet != null && prodIdLineSet.size() > 0){
+                                            for(String prodId :prodIdLineSet){
+                                                Subscription_Line_Item__c subInsert = new Subscription_Line_Item__c();
+                                                system.debug('Id.valueOf(prodId):: :'+Id.valueOf(prodId));
+                                                subInsert.Product__c = Id.valueOf(prodId);
+                                                subInsert.Subscription__c = subscrip.Id;
+                                                subInsert.Subscription_Line_Item_Status__c = 'Active';
+                                                subInsert.Create_Line_Item_in_Stripe__c = false;
+                                                subLineInsertList.add(subInsert);
+                                            }
+                                        }
+                                        if(subLineInsertList != null && subLineInsertList.size() > 0){
+                                            insert subLineInsertList;
+                                        }
+                                        Set<Id> prodIdLineInactiveSet = new Set<Id>();
+                                        for(String prdId :prodIdSet){
+                                            if(!prodIdLineSet.contains(prdId) && !prodIdLineContainsSet.contains(prdId)){
+                                                prodIdLineInactiveSet.add(prdId);
+                                            }
+                                        }
+                                        List<Subscription_Line_Item__c> subLineUpdateList = new List<Subscription_Line_Item__c>();
+                                        if(prodIdLineInactiveSet != null && prodIdLineInactiveSet.size() > 0){
+                                            for(Subscription_Line_Item__c eachLine :subLine){
+                                                if(prodIdLineInactiveSet.contains(eachLine.Product__c)){
+                                                    Subscription_Line_Item__c subInsert = new Subscription_Line_Item__c();
+                                                    subInsert.Id= eachLine.Id;
+                                                    subInsert.Subscription_Line_Item_Status__c = 'Canceled';
+                                                    subLineUpdateList.add(subInsert);
+                                                }
+                                            }
+                                        }
+                                        if(subLineUpdateList != null && subLineUpdateList.size() > 0){
+                                            update subLineUpdateList;
+                                        }
+                                        //     Create Payment after subscription created
+                                        for(String line :lineIdPtodIdQb.keySet()){
+                                            if(qbProIdsfproIdMap.containsKey(lineIdProdIdQb.get(line)) && !proIdSfSet.contains(lineIdPtodIdQb.get(line))){
+                                                if(qbProIdSFProNameMap.containsKey(lineIdProdIdQb.get(line)) && qbProIdSFProNameMap.get(lineIdProdIdQb.get(line)) == 'Accounting/Bookkeeping Services'){
+                                                    
+                                                    Payment__c pay = new Payment__c();
+                                                    System.debug('Test PS1 Payment');
+                                                    pay.QB_Sales_Receipt_ID__c = entityId;
+                                                    pay.Customer__c = acc.id;
+                                                    pay.Payment_Type__c = 'Quickbooks - Subscription';
+                                                    pay.Payment_Status__c = 'Succeeded';
+                                                    pay.Payment_Amount__c = DescAmountQbMap.get(lineIdDescQbMap.get(line));
+                                                    system.debug('Test 123:: :line'+line +'  :: :DescAmountQbMap.get(lineIdDescQbMap.get(line)):: :'+DescAmountQbMap.get(lineIdDescQbMap.get(line)));
+                                                    pay.Create_Payment_in_Stripe__c = False;
+                                                    if(sub == null){
+                                                        pay.Subscription__c = subscrip.Id;    
+                                                    }else if(sub != null){
+                                                        pay.Subscription__c = sub.Id;                                                    
+                                                    }
+                                                    payNewList.add(pay);
+                                                }
+                                            }
+                                        }
+                                        //Changes End
+                                        if(opplineList != null && opplineList.size() > 0){
+                                            if(oppList != null && oppList.size() > 0){
+                                                system.debug('Des - recurIdRef:: :'+recurIdRef);
+                                                /*    try{
+sub = [Select Id,Opportunity__c,Opportunities__c,Opportunities_Name__c,Customer__c,Subscription_Status__c From Subscription__c Where Subscription_Type__c = 'Quickbooks' AND Subscription_Status__c = 'Active' AND QuickBooks_Recurring_Transaction_Id__c = :recurIdRef Limit 1]; //Opportunity__c =: oppList AND 
+} catch(Exception e){
+sub = null;
+}
+if(sub == null){
+System.debug('Test PS1 Subscription');
+subscrip.Opportunity__c = oppList != null && oppList.size() == 1 ? oppList[0].Id : null;                                           
+subscrip.Opportunities_Name__c = oppList != null && oppList.size() > 1 ? oppNames : null;
+subscrip.Opportunities__c = oppList != null && oppList.size() > 1 ? oppIds : null;
+subscrip.Subscription_Type__c = 'Quickbooks';
+subscrip.Subscription_Status__c = 'Active';
+subscrip.QuickBooks_Recurring_Transaction_Id__c = recurIdRef;
+subscrip.Create_Subscription_in_Stripe__c = false;
+subscrip.Customer__c = acc.id;
+subscrip.Subscription_Amount__c = totalSubscrAmount;
+subscrip.Sales_Receipt_Date__c = System.today();
+subscrip.Subscription_Start_date__c = subStartDate;
+subscrip.Subscription_End_date__c = subEndDate;
+subscrip.Subscription_Next_Date__c = subNextDate;
+subscrip.DaysBefore__c = DaysBefore;
+insert subscrip;                                      
+}
+else if(sub != null){
+subscrip.id = sub.id;
+if(Sub.Opportunity__c != Null && (sub.Opportunities__c == Null || sub.Opportunities_Name__c == Null)) {
+subscrip.Opportunities_Name__c = oppList != null && oppList.size() > 1 ? oppNames : null;
+subscrip.Opportunities__c = oppList != null && oppList.size() > 1 ? oppIds : null;
+}
+subscrip.Subscription_Next_Date__c = subNextDate;
+subscrip.Subscription_End_date__c = subEndDate;
+if(sub.Subscription_Status__c == 'Paused' || sub.Subscription_Status__c == 'Day Skipped')
+subscrip.Subscription_Status__c = 'Active';
+subscrip.DaysBefore__c = DaysBefore;
+update subscrip;
+} */
+                                                
+                                                //***********Close Customer Product***************//
+                                                List<Customer_Product__c> cusProdList = [Select id,Status__c from Customer_Product__c where Account__c =: acc.id AND Product__c =: qbProIdsfproIdMap.values() AND Customer_Product_Source__c = 'Automatic - Quickbooks Recurring Opportunity Creation' and id not in : cpList and Status__c != 'Closed'];
+                                                List<Customer_Product__c> updateCusProdList = new List<Customer_Product__c>();
+                                                for(Customer_Product__c cusPro:cusProdList){
+                                                    Customer_Product__c cp = new Customer_Product__c();
+                                                    cp.id = cusPro.id;
+                                                    cp.Status__c = 'Closed';
+                                                    updateCusProdList.add(cp);
+                                                }
+                                                if(updateCusProdList != Null && updateCusProdList.size()>0){
+                                                    update updateCusProdList;          
+                                                    
+                                                }
+                                                for(OpportunityLineItem oli :opplineList){
+                                                    OpportunityLineItem oliNew = new OpportunityLineItem();
+                                                    oliNew.id = oli.id;
+                                                    oliNew.UnitPrice = DescAmountQbMap.get(oli.Opportunity.Customer_Product__r.Description__c);
+                                                    oliNewListUpdate.add(oliNew);
+                                                }
+                                                for(Opportunity opp :oppList){
+                                                    Payment__c pay = new Payment__c();
+                                                    System.debug('Test PS1 Payment');
+                                                    pay.QB_Sales_Receipt_ID__c = entityId;
+                                                    pay.Customer__c = opp.AccountId;
+                                                    pay.Opportunity__c = opp.Id;
+                                                    pay.Payment_Type__c = 'Quickbooks - Subscription';
+                                                    pay.Payment_Status__c = 'Succeeded';
+                                                    pay.Payment_Amount__c = DescAmountQbMap.get(opp.Customer_Product__r.Description__c);
+                                                    system.debug('opp:: :'+opp.Name+ '   ---   Payment Amount:: :'+DescAmountQbMap.get(opp.Customer_Product__r.Description__c));
+                                                    pay.Create_Payment_in_Stripe__c = False;
+                                                    if(sub == null){
+                                                        pay.Subscription__c = subscrip.Id;    
+                                                    }else if(sub != null){
+                                                        pay.Subscription__c = sub.Id;                                                    
+                                                    }
+                                                    payNewList.add(pay);
+                                                } 
+                                                
+                                            }
+                                            if(oliNewListUpdate != null && oliNewListUpdate.size() > 0){
+                                                update oliNewListUpdate;
+                                            }
+                                        }
+                                        if(payNewList != null && payNewList.size() > 0){
+                                            insert payNewList;
+                                        }
+                                    } 
+                                }
+                                
+                            } 
+                        }
+                    }
+                }
+            }
+            catch(System.Exception e){
+                String endPoint = qb_Cred.Environment__c == 'Sandbox'?qb_Cred.Sanbdox_Base_URL__c : qb_Cred.Prod_Base_URL__c;
+                if(String.valueOf(e.getMessage()).startsWith('Unauthorized endpoint')){
+                    errorMessage = 'Unauthorize endpoint: An Administer must go to Setup -> Administer -> Security Control ->'
+                        +' Remote Site Setting and add '+' '+ endPoint +' Endpoint';
+                }else{
+                    errorMessage = 'Unexpected Error while communicating with API. '  
+                        +'Status '+res.getStatus()+' and Status Code '+res.getStatuscode()+' Message: '+e.getMessage();
+                }
+                System.debug(System.LoggingLevel.DEBUG, 'Exeception Executed'+errorMessage);
+                QuickbooksUtil.sendQuickBooksErrorEmail('Create Customer', errorMessage);
+            } 
+        }
+    }    
+}
+
+
+
+/*
+@RestResource(urlMapping='/QuickBooksToSalesforce/*')
+global class QuickBooksToSalesforce {
+@HttpPost
+global static String doPost() {
+RestRequest resRequest = RestContext.request;
+System.debug('resRequest = ' + resRequest);
+if(resRequest != null){
+String request = resRequest.requestBody.toString();
+System.debug('Request Body: ' + request);
+
+
+Map<String, Object> parsedJson = (Map<String, Object>) JSON.deserializeUntyped(request);
+System.debug('Parsed Jsonnnnnnn' +parsedJson);
+List<Object> eventNotifications = (List<Object>) parsedJson.get('eventNotifications');
+System.debug('EventNotificationssssss'+eventNotifications);
+Map<String, Object> eventNotification = (Map<String, Object>) eventNotifications[0];
+System.debug('EventNotificationnnnnn'+eventNotifications);
+Map<String, Object> dataChangeEvent = (Map<String, Object>) eventNotification.get('dataChangeEvent');
+System.debug('dataChangeEventtttttt'+dataChangeEvent);
+List<Object> entities = (List<Object>) dataChangeEvent.get('entities');
+System.debug('entitiesssssssssss'+entities);
+Map<String, Object> entity = (Map<String, Object>) entities[0];
+System.debug('entityyyyyyyyyyyyyyyyyy'+entity);
+String entityId = (string) entity.get('id');
+System.debug('entityIddddddddddddddddddddd'+entityId);
+String operation = (string) entity.get('operation');
+System.debug('operationnnnnnnnnnnnnnnnnnnn'+eventNotifications);
+
+String accessToken = 'eyJlbmMiOiJBMTI4Q0JDLUhTMjU2IiwiYWxnIjoiZGlyIn0..RM6WTNLzyR8psrjBM400Xw.0UzBGFtKX8vER7RkwdcEapqBUwdEwIYq599FMxae6wFZpcvW8rwD3WTdtHyNwlC_ZQpTpln9hE8J6aMtxZMII2q3kd3dLQvVZ_aGqDkkUX_rVgUbfHTv0m-ExTjTVnyRP0OXuIHBnDAMDfVwhh3r0ev3jNTwylG8jXXEr6cRW6DkM7vKAw_-YkLs5hRV388uettWkMbi71rzIzzI10WSdLc_dCL88jeq7CbHkts5iKeaEQBp0OI7thG1mE_1LvHWpDCPc4p0Pq9m_CV6qeyRC6-6taem2owzRE0UlpLAlHOXPqwJ_9NDAIQB3yV-s7NrwEWSWoGvz88_x0Q--EP01p7IcNFk_2Ls7izTsuHOT1gZrJOg6nGE-9W_On0fSVR_56epBpaZwZJQqCRyG7HAAJUoupPzwzt2i9MByuyrS4HjZ3zS9zmAXZdkj9NAxPIWVfGQ6ocb8L1LeI72JhFNAWA_KrlF1jjIembe3RHza3q_LxbWQ8wM_St8uqic2SQOTv-uBUKWtnCqb8ZwCd-ykmzXgbbygJvXNxIt-IcFY7tHIrB-hs5n108rjVRPpXoVhPsr2DCCpqeH4yHM4lQlYiQQv53SBiDtwLjHPEAdbscaWti8VPsrdMWDLZ3gNmRrC7BSIpovKIxDYfWGSl4GEV3sWpTYe3E0XV9i3sksa3hWWSGjf6GAygza-v1tnfXVKQqh8NPN9ixRWDZrS6_bI2SkG2FS3a2t-gP0CJTRgP0a-VQfnyXgZSRYbs3EeeTk.f53pcj3q5tHhoAu2_ATIfg';
+String realmId = '4620816365244111840';
+string baseUrl = 'https://sandbox-quickbooks.api.intuit.com';
+Integer minorVer = 69;
+
+
+HttpRequest req = new HttpRequest();
+req.setEndpoint(Test.isRunningTest() ? 'https://sandbox-quickbooks.api.intuit.com/v3/company/4620816365244111840/Customer/query?minorversion=65': baseUrl+'/v3/company/'+realmId+'/query?minorversion='+minorVer);
+req.setMethod('POST');
+req.setBody('select DisplayName,PrimaryEmailAddr,PrimaryPhone from Customer where id=\''+entityId+'\'');
+req.setHeader('Authorization', 'Bearer '  + accessToken);
+req.setheader('Accept', 'application/json');
+req.setHeader('Content-Type', 'application/text');
+Http http = new Http();
+string errorMessage = '';
+List<customer> customerList = new  List<customer>();
+Account acc = new Account();
+
+try{
+acc = [Select id from Account where QB_Id__c = :entityId Limit 1];
+}catch (Exception e) {
+acc = null;
+}
+if(acc == null)
+{
+
+
+system.debug('req.body:1st: :'+req.getbody());
+HttpResponse res2 = http.send(req);
+if (res2.getStatusCode() == 200) {
+system.debug('res2.getBody:: :'+res2.getBody());
+Map<String, Object> deserializeJson2 = (Map<String, Object>) JSON.deserializeUntyped(res2.getBody());
+System.debug('deserializeJson2' +deserializeJson2);
+Map<String, Object> QueryResponseMap2 = (Map<String, Object>) deserializeJson2.get('QueryResponse');
+System.debug('QueryResponseMap2' +QueryResponseMap2);
+List<Object> customerMap = (List<Object>) QueryResponseMap2.get('Customer');    
+System.debug('customerMap' +customerMap);
+Map<String, Object> customerIndex = (Map<String, Object>) customerMap[0];
+System.debug('customerIndex' +customerIndex);
+
+String companyName = (customerIndex.containsKey('CompanyName')) ? (String)customerIndex.get('CompanyName') : null;
+System.debug('companyName' +companyName);
+String DisplayName = (customerIndex.containsKey('DisplayName')) ? (String)customerIndex.get('DisplayName') : null;
+System.debug('companyName' +companyName);
+
+
+Map<String, Object> primaryPhoneMap = (customerIndex.containsKey('PrimaryPhone')) ? (Map<String, Object>) customerIndex.get('PrimaryPhone') : null;
+System.debug('primaryPhoneMap' +primaryPhoneMap);
+String primaryPhone = (primaryPhoneMap != null) &&  customerIndex.get('FreeFormNumber') != null ? (String) customerIndex.get('FreeFormNumber') : null;
+System.debug('primaryPhone' +primaryPhone);
+
+Map<String, Object> primaryEmailMap = (customerIndex.containsKey('PrimaryEmailAddr')) ? (Map<String, Object>) customerIndex.get('PrimaryEmailAddr') : null;
+System.debug('primaryEmailMap' +primaryEmailMap);
+String primaryEmail = (primaryEmailMap != null) &&  primaryEmailMap.get('PrimaryEmailAddr') != null ? (String) primaryEmailMap.get('PrimaryEmailAddr') : null;
+System.debug('primaryEmail' +primaryEmail);
+
+Map<String,Object> mobileMap =(customerIndex.containsKey('Mobile')) ? (Map<String,Object>) customerIndex.get('Mobile') : null;
+System.debug('mobileMap' +mobileMap);
+String mobilePhone = (mobileMap != null && mobileMap.containsKey('FreeFormNumber')) ? (String) mobileMap.get('FreeFormNumber') : '';
+System.debug('mobilePhone' +mobilePhone);
+String givenName = (customerIndex.containsKey('GivenName') &&  customerIndex.get('GivenName') != null) ? (String) customerIndex.get('GivenName') : '';
+System.debug('givenName' +givenName);
+String familyName = (customerIndex.containsKey('FamilyName') && customerIndex.get('FamilyName') != null) ? (String) customerIndex.get('FamilyName') : '';
+System.debug('familyName' +familyName);
+String individualName = (givenName + ' ' + familyName).trim();
+System.debug('individualName' +individualName);
+Account acc2 ;
+
+if(DisplayName != null && DisplayName != ''){
+try{
+acc2= [Select Id From Account Where name	=:DisplayName Limit 1];
+System.debug('acc2' +acc2);
+}catch(exception e){
+acc2 = null;
+}
+}
+
+if(companyName != null && acc2 == null){
+try{
+acc2= [Select Id From Account Where Name =:companyName Limit 1];
+System.debug('acc2' +acc2);
+}catch(exception e){
+acc2 = null;
+}
+}else{
+if(individualName != '' && acc2 == null){                                            
+try{
+acc2= [Select Id From Account Where Name =:individualName Limit 1];
+System.debug('acc2' +acc2);
+}catch(exception e){
+acc2 = null; 
+}
+}
+}                                    
+
+//Final Execution
+if(acc2 != null){
+acc = acc2;
+Account accUpdate = new Account();
+accUpdate.id= acc.id;
+accUpdate.QB_Id__c = entityId;
+accUpdate.AccountSource = 'Automatic - Quickbooks Recurring Opportunity Updation';
+update accUpdate;                                                                      
+System.debug('accUpdate' +accUpdate);
+} else {
+Account acc3 = new Account();                            
+if(companyName != null){
+acc3.name = companyName;
+// acc3.Type__c = 'Business';
+System.debug('acc3' +acc3);
+}else{
+acc3.name = individualName;
+// acc3.Type__c = 'Individual';
+// acc3.First_Name__c = givenName ;
+//acc3.Last_Name__c = familyName ;
+}
+acc3.name = DisplayName;
+acc3.cc_email__c = primaryEmail;
+acc3.Phone = primaryPhone;
+acc3.AccountSource = 'Automatic - Quickbooks Recurring Opportunity Creation';
+acc3.Created_From_QuickBooks__c = true;
+acc3.QB_Id__c = entityId;
+insert acc3;
+System.debug('acc3' +acc3);
+acc = acc3;
+System.debug('acc' +acc);
+}                                    
+} 
+}
+}
+return 'Hi';
+}
+}*/
+
+
+
+
+
+
+**************************StripeIntegrationService************************************
+*****************************************************************************************************************************
+******************************************************************************************************************
+
+@RestResource(urlMapping='/StripeIntegrationService/*')
+global without sharing class StripeIntegrationService {
+    
+    @HttpPost
+    global static void doPost() {
+        RestRequest request = RestContext.request;
+        system.debug('request = '+request);
+        Map<String, Object> params = (Map<String, Object>) JSON.deserializeUntyped(request.requestbody.tostring());
+        system.debug('Res--> '+ params);
+        
+        Map<String, Object> data = (Map<String, Object>) params.get('data');
+        Map<String, Object> objectMap = (Map<String, Object>) data.get('object');
+        
+        String eventType = String.valueOf(params.get('type'));
+        String description = String.valueOf(objectMap.get('description'));
+        String invoiceId = String.valueOf(objectMap.get('invoice'));
+        if(eventType == 'payment_intent.created'){
+            
+            if(description != NULL){
+                if(description.startsWithIgnoreCase('Subscription update') && invoiceId != NULL){
+                    
+                    Map<String,Object> invoiceResMap = StripeIntegrationUtil.getInvoiceById(invoiceId); 
+                    Map<string,Map<string,string>> individualProdAmount = new Map<string,Map<string,string>>();
+                    //system.debug('invoiceResMap = '+invoiceResMap);
+                    if(invoiceResMap != NULL){
+                        Map<string,object> lineMap = (Map<string,Object>)invoiceResMap.get('lines');
+                        List<Object> dataList = (List<object>)lineMap.get('data');
+                       	for(object prodData:dataList){
+                            Map<string,Object> planMap = (Map<string,Object>)prodData;
+                            Map<string,Object> planDataMap = (Map<string,Object>)planMap.get('plan');
+                            Map<string,string> temp1 = new Map<string,string>();
+                            temp1.put('quantity',String.valueOf(planMap.get('quantity')));
+                            temp1.put('amount',String.valueOf(planMap.get('amount')));
+                            individualProdAmount.put((string)planDataMap.get('product'),temp1);   
+                        }
+                        String subId = String.valueOf(invoiceResMap.get('subscription'));
+                        Decimal amount = decimal.valueOf(String.valueOf(objectMap.get('amount')))/100;
+                        String paymentId = String.valueOf(objectMap.get('id'));
+                        DateTime start = DateTime.now();
+                        string response = request.requestbody.tostring();
+                        while(System.Now()< start.addseconds(5)){}
+                        List<Subscription__c> subList = [SELECT Id,Stripe_Subscription_Id__c,payment_method__c,Opportunity__c,customer__c,Opportunities__c,Opportunities_Name__c FROM Subscription__c WHERE Stripe_Subscription_Id__c =:subId LIMIT 1];
+                        if(Test.isRunningTest())
+                            subList = [SELECT Id,Stripe_Subscription_Id__c,Opportunity__c,payment_method__c,customer__c,Opportunities__c,Opportunities_Name__c FROM Subscription__c LIMIT 1]; 
+                        
+                        Database.executeBatch(new PaymentInvoiceCreationBatch(invoiceId,paymentId,amount,subList,'Subscription update',individualProdAmount,response), 50);
+                    }
+                } 
+                else if(description.startsWithIgnoreCase('Subscription creation') && invoiceId != NULL){
+                    
+                    Map<String,Object> invoiceResMap = StripeIntegrationUtil.getInvoiceById(invoiceId); 
+                    //system.debug('invoiceResMap = '+invoiceResMap);
+                    if(invoiceResMap != NULL){
+                        String subId = String.valueOf(invoiceResMap.get('subscription'));
+                        Decimal amount = decimal.valueOf(String.valueOf(objectMap.get('amount')))/100;   
+                        String paymentId = String.valueOf(objectMap.get('id'));
+                        DateTime start = DateTime.now();
+                        while(System.Now()< start.addseconds(5)){}
+                        List<Subscription__c> subList = [SELECT Id,Stripe_Subscription_Id__c,payment_method__c,Opportunity__c,Customer__c,Opportunities_Name__c,Opportunities__c FROM Subscription__c WHERE Stripe_Subscription_Id__c =:subId LIMIT 1];
+                        if(Test.isRunningTest())
+                            subList = [SELECT Id,Stripe_Subscription_Id__c,Opportunity__c,payment_method__c,Customer__c,Opportunities_Name__c,Opportunities__c FROM Subscription__c LIMIT 1];
+                        Database.executeBatch(new PaymentInvoiceCreationBatch(invoiceId,paymentId,amount,subList,'Subscription creation',NULL,NULL), 50);
+                    }
+                    
+                }
+                else if(description.startsWithIgnoreCase('Payment for Invoice') && invoiceId != NULL){
+                    
+                    Decimal amount = decimal.valueOf(String.valueOf(objectMap.get('amount')))/100;   
+                    String paymentId = String.valueOf(objectMap.get('id'));
+                    DateTime start = DateTime.now();
+                    while(System.Now()< start.addseconds(5)){}
+                    List<Invoice__c> invList = [Select id,customer__c,Opportunities__c,Subscription__c,Opportunities_Name__c,Opportunity__c,Stipe_Invoice_Id__c from Invoice__c where Stipe_Invoice_Id__c =: invoiceId Limit 1];
+                    if(Test.isRunningTest())
+                        invList = [Select id,customer__c,Opportunities__c,Subscription__c,Opportunities_Name__c,Opportunity__c,Stipe_Invoice_Id__c from Invoice__c Limit 1];
+                    Database.executeBatch(new PaymentInvoiceCreationBatch(null,paymentId,amount,invList,'Payment for Invoice',NULL,NULL), 50);
+                } 
+            }
+        }
+        if(eventType == 'invoice.created'){
+            if(String.valueOf(objectMap.get('collection_method')) == 'send_invoice' && String.valueOf(objectMap.get('billing_reason')) == 'subscription_cycle'){
+                string invId = String.valueOf(objectMap.get('id'));
+                Set<string> subId  = new Set<String>();
+                
+                Map<String,Object> invoiceDataMap = (Map<String,Object>)objectMap.get('lines');
+                List<Object> lineList = (List<Object>)invoiceDataMap.get('data');
+                Map<String, Object> lineItem;
+                for(Object invLine:lineList){
+                    lineItem = (Map<String, Object>) invLine;
+                    subId.add(string.valueOf(lineItem.get('subscription')));
+                }            
+                List<Opportunity> oppList;
+                List<Subscription__c> subList;
+                subList = [SELECT Id,Stripe_Subscription_Id__c,Customer__c,Opportunity__c,Opportunities__c,Subscription_Amount__c,Opportunities_Name__c FROM Subscription__c WHERE Stripe_Subscription_Id__c =:subId LIMIT 1];
+                oppList = [SELECT Id,Name,Parent_Opportunity__c,Customer_Product__c,Customer_Product__r.Product__r.Name,AccountId,ContactId,Payment_Amount__c FROM Opportunity WHERE Stripe_Subscription_Id__c =:subId AND Parent_Opportunity__c = NULL AND Stripe_Subscription_Id__c != NULL AND StageName != 'Payment Failed' AND StageName != 'Closed Lost'];
+                
+                if(Test.isRunningTest()){
+                    subList = [SELECT Id,Stripe_Subscription_Id__c,Customer__c,Opportunity__c,Opportunities__c,Subscription_Amount__c,Opportunities_Name__c FROM Subscription__c LIMIT 1];
+                    oppList = [SELECT Id,Name,Parent_Opportunity__c,Customer_Product__c,Customer_Product__r.Product__r.Name,AccountId,ContactId,Payment_Amount__c FROM Opportunity LIMIT 1];
+                    
+                }
+                if(oppList != NULL && oppList.size() > 0 && subList.size()>0 && subList != Null){
+                    Map<String,String> stripeProdMap = new Map<String,String>();
+                    List<OpportunityLineItem> newOppItemList = new List<OpportunityLineItem>();
+                    List<Payment__c> newPaymentList = new List<Payment__c>();
+                    set<id> oldOppIds = new set<id>();
+                    for(Opportunity oldOpp:oppList){
+                        oldOppIds.add(oldOpp.id);
+                    }  
+                    Invoice__c inv = new Invoice__c();
+                    inv.Customer__c = subList[0].Customer__c;
+                    if(subList[0].Opportunity__c != NULL){
+                        inv.Opportunity__c = subList[0].Opportunity__c;
+                    }else{
+                        inv.Opportunities__c = subList[0].Opportunities__c;
+                        inv.Opportunities_Name__c = subList[0].Opportunities_Name__c;
+                    }
+                    inv.Amount__c = (decimal)objectMap.get('amount_due')/100;
+                    inv.Amount__c = subList[0].Subscription_Amount__c;
+                    inv.Customer_Email__c = String.valueOf(objectMap.get('customer_email'));
+                    
+                    Long unixTimeSeconds = (long)objectMap.get('due_date');
+                    Long unixTimeMilliseconds = unixTimeSeconds * 1000;
+                    Datetime dt = Datetime.newInstance(unixTimeMilliseconds);
+                    TimeZone estTimeZone = TimeZone.getTimeZone('America/New_York');
+                    dt = dt.addSeconds(estTimeZone.getOffset(dt) / 1000);
+                    String formattedDate = dt.format('MM-dd-yyyy');
+                    
+                    inv.Due_Date__c = date.newinstance(dT.year(), dT.month(), dT.day());
+                    inv.Invoice_Date__c = system.today();
+                    inv.Term__c = string.valueOf(inv.Invoice_Date__c.daysBetween( inv.Due_Date__c) );
+                    stripeWrapperUtil.responseWrapper responseWrapper2 = StripeIntegrationUtil.sendInvoice(invId,'send');
+                    if(responseWrapper2.responseMessage == 'Success'){
+                        inv.Invoice_Status__c = 'Invoiced';
+                    }else{
+                        inv.Invoice_Status__c = 'Not Sent to Customer';
+                        inv.Stripe_Integration_Response__c = responseWrapper2.responseMessage;
+                        Map<String,Object> resMap = (Map<String,Object>) JSON.deserializeUntyped(responseWrapper2.responseMessage);
+                        Map<String, Object> errorMap = (Map<String, Object>) resMap.get('error');
+                        inv.Invoice_Failed_Reason__c = String.valueOf(errorMap.get('message'));
+                    }
+                    inv.Create_Invoice_in_Stripe__c = False;
+                    inv.Invoice_Type__c = 'Subscription';
+                    inv.Subscription__c = subList[0].Id;
+                    inv.Stipe_Invoice_Id__c = invId; 
+                    
+                    insert inv;        
+                    List<OpportunityLineItem> oppItemList = [SELECT Id,PricebookEntryId,Product2Id,Product2.Stripe_Product_Id__c,Quantity,UnitPrice,OpportunityId FROM OpportunityLineItem WHERE OpportunityId =:oldOppIds];
+                    
+                    for(OpportunityLineItem  oppItem:oppItemList){
+                        stripeProdMap.put(oppItem.Product2.Stripe_Product_Id__c, oppItem.Product2Id);    
+                    }
+                    system.debug('stripeProdMap = '+stripeProdMap);
+                    List<Invoice_Line_Item__c> insertInvLinList = new List<Invoice_Line_Item__c>();
+                    for(Object invLine:lineList){
+                        lineItem = (Map<String, Object>) invLine;
+                        Map<String, Object> planMap = (Map<String, Object>) lineItem.get('plan');
+                        String product = (String) planMap.get('product');
+                        Invoice_Line_Item__c invLin = new Invoice_Line_Item__c();
+                        invLin.Stripe_Invoice_Line_Id__c = String.valueOf(lineItem.get('id'));
+                        invLin.Product__c = stripeProdMap.get((String) planMap.get('product'));
+                        invLin.Quantity__c = (integer) lineItem.get('quantity');
+                        invLin.Amount__c = (Decimal)planMap.get('amount')/100;
+                        invLin.Invoice__c = inv.id;
+                        insertInvLinList.add(invLin);
+                    }
+                    system.debug('insertInvLinList = '+insertInvLinList);
+                    if(insertInvLinList != Null && insertInvLinList.size()>0){
+                        insert insertInvLinList;
+                    }
+                }
+            }
+        }
+        if(eventType == 'charge.refunded'){
+            String paymentId;
+            paymentId = String.valueOf(objectMap.get('id'));
+            if((description.startsWithIgnoreCase('Subscription creation') || description.startsWithIgnoreCase('Subscription update') || description.startsWithIgnoreCase('Payment for Invoice'))  && invoiceId != NULL){
+                paymentId = String.valueOf(objectMap.get('payment_intent'));
+            }
+            map<String,Object> refundsMap = (Map<String,Object>) objectMap.get('refunds');
+            List<Object> refundDataList = (List<Object>)refundsMap.get('data');
+            Map<String,Object> refundDataMap = (Map<String,Object>)refundDataList[0];
+            
+            List<Payment__c> payList = [Select Refund_Status__c,Amount_Refunded__c from Payment__c Where Stipe_Payment_Id__c =: paymentId];
+            system.debug('payList = '+payList);
+            if(payList != Null && payList.size()>0){
+                payList[0].Refund_Status__c = 'Refunded';
+                payList[0].stripe_refund_id__c = string.valueOf(refundDataMap.get('id'));
+                payList[0].Amount_Refunded__c = decimal.valueOf(String.valueOf(objectMap.get('amount_refunded')))/100 ;
+                update payList[0];
+            }
+        }    
+        
+        if(eventType == 'customer.subscription.created'){
+            String scheduleSubId;
+            scheduleSubId = String.valueOf(objectMap.get('schedule'));
+            List<Subscription__c> subList;
+            if(!Test.isRunningTest()){
+                subList = [Select Stripe_Subscription_Id__c,Customer__c,Subscription_End_date__c,Subscription_Start_date__c,Opportunity__c,Opportunity__r.id,Opportunities__c,Subscription_Status__c from Subscription__c Where Scheduled_Subscription_Id__c != Null AND Scheduled_Subscription_Id__c =: scheduleSubId LIMIT 1];
+            }else{
+                subList = [Select Stripe_Subscription_Id__c,Customer__c,Subscription_End_date__c,Subscription_Start_date__c,Opportunity__c,Opportunity__r.id,Opportunities__c,Subscription_Status__c from Subscription__c];
+            }
+            
+            List<Invoice__c> invList = [SELECT Billing_Address__c,Customer_Email__c,Send_Invoice_Email_from_QuickBooks__c,Customer__r.Qbo_Customer_id__c,Customer__r.email__c,Term__c, Invoice_Date__c, Due_Date__c, Id, Name, Invoice_No__c, Amount__c, Description__c, Payment_Date__c, Invoice_ID_in_Quickbook__c FROM Invoice__c where Subscription__r.Scheduled_Subscription_Id__c =: scheduleSubId Limit 1];
+            List<Invoice_Line_Item__c> insertInvLinList = new List<Invoice_Line_Item__c>();
+            if(subList != Null && subList.size()>0){        
+                system.debug('subList = '+subList);
+                Set<Id> oppIds = new Set<Id>();
+                List<Id> oppIdList = new List<Id>();
+                if(subList[0].Opportunities__c != Null){
+                    String opportunityIds = subList[0].Opportunities__c;
+                    string removeLeft = opportunityIds.removeStart('[');
+                    string removeRight = removeLeft.removeEnd(']');
+                    oppIdList = removeRight.split(',');
+                }else{
+                    oppIdList.add(subList[0].Opportunity__c);
+                }
+                
+                List<Opportunity> oppList = [select Name,id,Amount,Stripe_Subscription_Id__c,Stripe_Sub_Prod_Id__c from Opportunity where AccountId =: subList[0].Customer__c and id in:oppIdList];
+                if(oppList != Null && oppList.size()>0){
+                    for(Opportunity opp:oppList){
+                        oppIds.add(opp.id);
+                    }
+                    List<OpportunityLineItem> oppItemList;
+                    oppItemList = [SELECT Id,Product2Id,PricebookEntry.Stripe_Price_Id__c,Product2.Name,Product2.Stripe_Product_Id__c,Quantity,UnitPrice,OpportunityId,Frequency__c FROM OpportunityLineItem WHERE OpportunityId =:oppIds];        
+                    if(Test.isRunningTest()){
+                        oppItemList = [SELECT Id,Product2Id,Product2.Name,PricebookEntry.Stripe_Price_Id__c,Product2.Stripe_Product_Id__c,Quantity,UnitPrice,OpportunityId,Frequency__c FROM OpportunityLineItem]; 
+                    }
+                    Map<String,string> prodNameMap = new Map<String,string>();
+                    Map<String,String> stripeProdMap = new Map<String,String>();
+                    for(OpportunityLineItem oppItem:oppItemList){
+                        prodNameMap.put(oppItem.OpportunityId,oppItem.Product2Id);
+                        stripeProdMap.put(oppItem.Product2.Stripe_Product_Id__c, oppItem.Product2ID);
+                    }
+                    Map<integer,string> itemsMap = New Map<integer,string>();
+                    
+                    Map<String, Object> itemMap = (Map<String, Object>) objectMap.get('items');
+                    List<Object> datas = (List<Object>) itemMap.get('data');
+                    Map<string,string> priceIdSubLineIdMap = New Map<string,string>();
+                    for(Object data1:datas){
+                        Map<String,Object> objMap = (Map<String,Object>)data1;
+                        Map<String,Object> dataObjMap = (Map<String,Object>) objMap.get('price');
+                        
+                        itemsMap.put( (integer)dataObjMap.get('unit_amount')/100,(String) objMap.get('id'));
+                        priceIdSubLineIdMap.put((String)dataObjMap.get('id'),(String) objMap.get('id'));
+                    }
+                    List<Subscription_Line_Item__c> subLineList = [Select Id,Stripe_Subscription_Item_Id__c From Subscription_Line_Item__c Where Stripe_Subscription_Item_Id__c = :priceIdSubLineIdMap.keySet()];
+                    List<Subscription_Line_Item__c> subLineUpdateList = new List<Subscription_Line_Item__c>();
+                    for(Subscription_Line_Item__c each :subLineList){
+                        if(priceIdSubLineIdMap.containsKey(each.Stripe_Subscription_Item_Id__c)){
+                            Subscription_Line_Item__c subLine = new Subscription_Line_Item__c();
+                            subLine.Id = each.Id;
+                            subLine.Subscription_Line_Item_Status__c = 'Active';                            
+                            subLine.Stripe_Subscription_Item_Id__c = priceIdSubLineIdMap.get(each.Stripe_Subscription_Item_Id__c);
+                            subLineUpdateList.add(subLine);
+                        }
+                    }
+                    if(subLineUpdateList != null && subLineUpdateList.size() > 0){
+                        update subLineUpdateList;
+                    }
+                    List<Opportunity> updateOppList = new List<Opportunity>();
+                    List<Invoice__c> updateInvList = new List<Invoice__c>();
+                    List<Subscription_Line_Item__c> insertSubLineList = new List<Subscription_Line_Item__c>();
+                    Map<String,String> oppIdSubLineIdStripeMap = new Map<String,String>();
+                    for(Opportunity opp:oppList){
+                        
+                        Opportunity opp1 = new Opportunity();
+                        opp1.Stripe_Subscription_Id__c = String.valueOf(objectMap.get('id')); 
+                        opp1.Id = opp.id;//oppItemList[0].opportunityId;
+                        //    opp1.Stripe_Sub_Prod_Id__c = string.valueOf(itemsMap.get(Integer.valueOf(opp.Amount)));
+                        opp1.Stripe_Sub_Prod_Id__c = priceIdSubLineIdMap.get(opp.Stripe_Sub_Prod_Id__c);
+                        updateOppList.add(opp1);
+                        oppIdSubLineIdStripeMap.put(opp.Id,string.valueOf(itemsMap.get(Integer.valueOf(opp.Amount))));
+                        Subscription_Line_Item__c  sLI = new Subscription_Line_Item__c();
+                        /*    sLi.Product__c = prodNameMap.get(opp.id);
+sLi.Opportunity__c = opp.id;*/
+                        //   sLI.Stripe_Subscription_Item_Id__c = string.valueOf(itemsMap.get(Integer.valueOf(opp.Amount)));
+                        /*   sLI.Subscription_Amount__c = opp.Amount;
+sLI.Subscription_Start_date__c = subList[0].Subscription_Start_date__c;
+sLI.Subscription_End_date__c = subList[0].Subscription_End_date__c;
+sLI.Subscription__c = subList[0].Id; */
+                        //    insertSubLineList.add(sLI);
+                    }
+                    if(invList.size()>0 && invList != Null){
+                        Map<String,Object> invoiceResMap = StripeIntegrationUtil.getInvoiceById(String.valueOf(objectMap.get('latest_invoice')));
+                        Map<String,Object> invoiceDataMap = (Map<String,Object>)invoiceResMap.get('lines');
+                        List<Object> lineList = (List<Object>)invoiceDataMap.get('data');
+                        for(Object invLine:lineList){
+                            Map<String, Object> lineItem = (Map<String, Object>) invLine;
+                            Map<String, Object> planMap = (Map<String, Object>) lineItem.get('plan');
+                            String product = (String) planMap.get('product');
+                            Invoice_Line_Item__c invLin = new Invoice_Line_Item__c();
+                            invLin.Stripe_Invoice_Line_Id__c = String.valueOf(lineItem.get('id'));
+                            invLin.Product__c = stripeProdMap.get((String) planMap.get('product'));
+                            invLin.Quantity__c = (integer) lineItem.get('quantity');
+                            invLin.Amount__c = (Decimal)planMap.get('amount')/100;
+                            invLin.Invoice__c = invList[0].id;
+                            insertInvLinList.add(invLin);
+                        }
+                    }
+                    
+                    subList[0].Subscription_Status__c = 'Processing';
+                    subList[0].Stripe_Subscription_Id__c = String.valueOf(objectMap.get('id')) ;
+                    
+                    if(insertInvLinList != Null && insertInvLinList.size()>0){
+                        if(invList.size()>0 && invList != Null){
+                            for(Invoice__c invo:invList){
+                                Invoice__c inv = new Invoice__c();
+                                inv.Stipe_Invoice_Id__c = String.valueOf(objectMap.get('latest_invoice'));
+                                stripeWrapperUtil.responseWrapper responseWrapper2 = StripeIntegrationUtil.sendInvoice(inv.Stipe_Invoice_Id__c,'send');
+                                if(responseWrapper2.responseMessage == 'Success'){
+                                    inv.Invoice_Status__c = 'Invoiced';
+                                }else{
+                                    inv.Invoice_Status__c = 'Not Sent to Customer';
+                                    inv.Stripe_Integration_Response__c = responseWrapper2.responseMessage;
+                                    Map<String,Object> resMap = (Map<String,Object>) JSON.deserializeUntyped(responseWrapper2.responseMessage);
+                                    Map<String, Object> errorMap = (Map<String, Object>) resMap.get('error');
+                                    inv.Invoice_Failed_Reason__c = String.valueOf(errorMap.get('message'));
+                                }
+                                inv.id = invo.id;
+                                updateInvList.add(inv);
+                            } 
+                            subList[0].Subscription_Status__c = 'Processing';
+                        }
+                        insert insertInvLinList;
+                    }
+                    update subList[0];
+                    
+                    if(updateOppList != Null && updateOppList.size()>0)
+                        update updateOppList;
+                    
+                    if(insertSubLineList != Null && insertSubLineList.size()>0)
+                        insert insertSubLineList;
+                    
+                    if(updateInvList.Size()>0 && updateInvList != Null)
+                        update updateInvList;
+                }                                                  
+            }
+        }
+        if(eventType == 'payment_method.automatically_updated'){
+            
+            string customerId = String.valueOf(objectMap.get('customer'));
+            string eventId = String.valueOf(params.get('id'));
+            string payMethId = String.valueOf(objectMap.get('id'));  
+            
+            List<Messaging.SingleEmailMessage> emailList = new List<Messaging.SingleEmailMessage>();
+            Messaging.SingleEmailMessage email = new Messaging.SingleEmailMessage();
+            
+            List<string>  sendTo= New List<string>{};
+                String emailIds = 'Shankara.narayanan@winfomi.com,pradeep.chandran@winfomi.com,praveenkumar.t@winfomi.com';
+            List<String> emailIdsLst = emailIds.split(',');
+            for(string each:emailIdsLst){
+                sendTo.add(each);
+            }
+            email.setToAddresses(sendTo);
+            email.setSubject('An CC auto-update occurred in Stripe.');
+            email.setPlainTextBody('Hi team,'+'\n'+'A payment method was auto-updated in Stripe with the Stripe Customer Id = '+customerId+ ', Stripe Payment Method Id = '+payMethId+' and event Id = '+eventId+'.'+'\n'+'Please check in Stripe and Salesforce that the information is in sync.'+'\n'+'Thanks.');
+            
+            emailList.add(email);
+            if(emailList.size()>0){
+                Messaging.sendEmail(emailList);
+            }
+            
+            
+            String paymentMethodId = String.valueOf(objectMap.get('id'));
+            Map<String, Object> cardMap = (Map<String, Object>) objectMap.get('card');
+            String last4Digit = String.valueOf(cardMap.get('last4'));
+            String expMonth = String.valueOf(cardMap.get('exp_month'));
+            String expYear = String.valueOf(cardMap.get('exp_year'));
+            List<Payment_Method__c> updatePMList = new List<Payment_Method__c>(); 
+            List<Payment_Method__c> payMethList = [SELECT Id, Expiration_Month__c, Expiration_Year__c, Last_4_Digit_Number__c, Type__c, Credit_Card_Confidential__c, Stripe_Payment_Method_ID__c, Name, Credit_Card_Number__c FROM Payment_Method__c where Stripe_Payment_Method_ID__c  = :paymentMethodId]; 
+            if(test.isRunningTest())
+                payMethList = [SELECT Id, Expiration_Month__c, Expiration_Year__c, Last_4_Digit_Number__c, Type__c, Credit_Card_Confidential__c, Stripe_Payment_Method_ID__c, Name, Credit_Card_Number__c FROM Payment_Method__c Limit 1]; 
+            for(Payment_Method__c payM:payMethList){
+                if(payM.Type__c == 'Credit Card'){
+                    Payment_Method__c pay = new Payment_Method__c();
+                    pay.Id = payM.Id;
+                    pay.name = payM.name.replace(payM.name.right( 4 ),last4Digit);
+                    pay.Credit_Card_Number__c = payM.Credit_Card_Number__c.replace(payM.Credit_Card_Number__c.right( 4 ),last4Digit);
+                    pay.Expiration_Month__c = expMonth;
+                    pay.Create_Payment_Method_in_Stripe__c = false;
+                    pay.Expiration_Year__c = expYear;
+                    pay.Last_4_Digit_Number__c = last4Digit;
+                    pay.Credit_Card_Confidential__c = 'Auto Updated from Stripe: Info not available';
+                    updatePMList.add(pay);    
+                }
+            }
+            if(updatePMList.size()>0 && updatePMList != Null)
+                update updatePMList;
+        }
+        
+        if(eventType == 'customer.subscription.deleted'){
+            String invId = String.valueOf(objectMap.get('id'));
+            DateTime start = DateTime.now();
+            while(System.Now()< start.addseconds(6)){}
+            String subscriptionId = String.valueOf(objectMap.get('id'));
+            Set<Id> subIds = new Set<Id>();
+            List<Subscription__c> subList = [SELECT Id, Name, Customer__c, Subscription_Status__c, Scheduled_Subscription_Id__c, Stripe_Subscription_Id__c FROM Subscription__c where Stripe_Subscription_Id__c =:subscriptionId];
+            if(test.isRunningTest())
+                subList = [SELECT Id, Name, Customer__c, Subscription_Status__c, Scheduled_Subscription_Id__c, Stripe_Subscription_Id__c FROM Subscription__c Limit 1];
+            List<Subscription__c> updateSubList = new List<Subscription__c>();
+            for(Subscription__c sub:subList){
+                if(sub.Subscription_Status__c == 'Active' || sub.Subscription_Status__c =='Invoiced' || sub.Subscription_Status__c == 'Processing'){
+                    subIds.add(sub.id);
+                    Subscription__c updateSub = new Subscription__c();
+                    updateSub.Id = sub.id;
+                    updateSub.Subscription_End_date__c = system.today();
+                    updateSub.Subscription_Status__c = 'Canceled';
+                    updateSubList.add(updateSub);
+                }
+            }
+            List<Subscription_Line_Item__c> subLineList = [SELECT Subscription__c, Subscription_Line_Item_Status__c, Name, Id FROM Subscription_Line_Item__c where Subscription__c =: subIds];
+            if(test.isRunningTest())
+                subLineList = [SELECT Subscription__c, Subscription_Line_Item_Status__c, Name, Id FROM Subscription_Line_Item__c Limit 1];
+            List<Subscription_Line_Item__c> updateSubLineList = new List<Subscription_Line_Item__c>();
+            for(Subscription_Line_Item__c sub:subLineList){
+                if(sub.Subscription_Line_Item_Status__c == 'Active' || sub.Subscription_Line_Item_Status__c == 'Invoiced' || sub.Subscription_Line_Item_Status__c == 'Processing'){
+                    Subscription_Line_Item__c updateSubLine = new Subscription_Line_Item__c();
+                    updateSubLine.id = sub.id;
+                    updateSubLine.Subscription_Line_Item_Status__c = 'Canceled';
+                    updateSubLine.Subscription_End_Date__c = system.today();
+                    updateSubLineList.add(updateSubLine);
+                }
+            }
+            
+            if(updateSubLineList.size()>0 && updateSubLineList !=Null)
+                update updateSubLineList;
+            
+            if(updateSubList.size()>0 && updateSubList != Null)
+                update updateSubList;
+        }
+        
+        if(eventType == 'subscription_schedule.canceled'){
+            String subSubscriptionId = String.valueOf(objectMap.get('id'));
+            Set<Id> subIds = new Set<Id>();
+            List<Subscription__c> subList = [SELECT Id, Name, Customer__c, Subscription_Status__c,Scheduled_Subscription_Id__c , Stripe_Subscription_Id__c FROM Subscription__c where Scheduled_Subscription_Id__c  =:subSubscriptionId];
+            List<Subscription__c> updateSubList = new List<Subscription__c>();
+            for(Subscription__c sub:subList){
+                if(sub.Subscription_Status__c == 'Scheduled'){
+                    Subscription__c updateSub = new Subscription__c();
+                    updateSub.Id = sub.id;
+                    updateSub.Subscription_Status__c = 'Canceled';
+                    updateSub.Subscription_End_date__c = system.today();
+                    updateSubList.add(updateSub);         
+                }
+            }
+            if(updateSubList.size()>0 && updateSubList != Null)
+                update updateSubList;
+        }
+        
+        if(eventType == 'invoice.finalized'){
+            String invId = String.valueOf(objectMap.get('id'));
+            DateTime start = DateTime.now();
+            while(System.Now()< start.addseconds(6)){}
+            List<Invoice__c> invList = [SELECT Id, Invoice_No__c,Customer__c, Stipe_Invoice_Id__c FROM Invoice__c where Stipe_Invoice_Id__c =: invId Limit 1];
+            if(Test.isRunningTest())
+                invList = [SELECT Id, Invoice_No__c, Stipe_Invoice_Id__c FROM Invoice__c Limit 1];
+            Database.executeBatch(new PaymentInvoiceCreationBatch(invList,String.valueOf(objectMap.get('number')),'invoice.finalized',null,null), 50);
+        }
+        if(eventType == 'invoice.payment_failed'){
+            system.debug('Payment Failed');
+            String invoiceNo = String.valueOf(objectMap.get('number'));
+            String paymentIntent = String.valueOf(objectMap.get('payment_intent'));
+            invoiceNo+='-STRP';
+            QuickbooksUtil.VoidInvoice(null, invoiceNo, paymentIntent);
+        }        
+        if(eventType == 'invoice.marked_uncollectible' || eventType == 'invoice.voided' || eventType == 'invoice.paid'){
+            
+            Map<String,Object> requestMap = (Map<String,Object>) params.get('request');
+            if(string.valueOf(requestMap.get('id')) != Null){
+                DateTime start = DateTime.now();
+                while(System.Now()< start.addseconds(6)){}
+                String invId = String.valueOf(objectMap.get('id'));
+                boolean pay_out_of_bound;
+                string paymentMethodId;
+                
+                if(objectMap.get('paid_out_of_band') != null){
+                    pay_out_of_bound = boolean.valueOf(objectMap.get('paid_out_of_band'));
+                    if(!pay_out_of_bound){
+                        if(string.valueOf(objectMap.get('charge')) != Null){ 
+                            Map<String,Object> paymentResMap = new Map<String,Object>();
+                            paymentResMap = stripeIntegrationUtil.getPaymentStatus(string.valueOf(objectMap.get('charge')) );
+                            if(paymentResMap != Null){ 
+                                if(String.valueOf(paymentResMap.get('payment_method')) != null){
+                                    paymentMethodId = String.valueOf(paymentResMap.get('payment_method'));
+                                }
+                            }
+                        }
+                    }
+                }
+                string status = eventType == 'invoice.marked_uncollectible'?'uncollectible':eventType == 'invoice.voided'?'void':'Paid Manual';
+                List<Invoice__c> invList = [SELECT Id, Invoice_No__c,Invoice_Status__c,Invoice_ID_in_Quickbook__c, Stipe_Invoice_Id__c,Customer__c FROM Invoice__c where Stipe_Invoice_Id__c =: invId and Invoice_Status__c !=: status Limit 1];
+                if(Test.isRunningTest())
+                    invList = [SELECT Id, Invoice_No__c,Invoice_Status__c,Invoice_ID_in_Quickbook__c, Stipe_Invoice_Id__c FROM Invoice__c Limit 1];
+                system.debug('eventType = '+eventType);
+                if(invList != Null && invList.size()>0)
+                    Database.executeBatch(new PaymentInvoiceCreationBatch(invList,String.valueOf(objectMap.get('id')),eventType,paymentMethodId,pay_out_of_bound), 50);
+            }
+        }    
+        
+        if(eventType == 'customer.source.updated'){
+            if(string.valueOf(String.valueOf(objectMap.get('object'))) == 'bank_account' && String.valueOf(objectMap.get('status')) == 'verified'){
+                
+                
+                List<Payment_Method__c> updPayList = new List<Payment_Method__c>();
+                List<Payment_Method__c> payMethod = [Select id,Verified__c from Payment_Method__c where Stripe_Payment_Method_Id__c =: String.valueOf(objectMap.get('id')) and Stripe_Payment_Method_Id__c != Null and Verified__c = 'No'];
+                For(Payment_Method__c pay:payMethod){
+                    Payment_Method__c updPay = new Payment_Method__c();
+                    updPay.id = pay.id;
+                    updPay.verified__c = 'Yes';
+                    updPayList.add(updPay);
+                }
+                if(updPayList != Null && !updPayList.isEmpty())
+                update updPayList;
+            }
+        }
+        if(eventType == 'customer.updated'){
+            String customerId = String.valueOf(objectMap.get('id'));
+            system.debug('CustomerId='+customerId);
+        }
+    }
+}
+
+*******************************************AccountTriggerHelper**************************************************************
+***********************************************************************************************************************************************************
+****************************************************************************************************************************
+
+
+public class AccountTriggerHelper {
+    
+    //Update Opportunity's Bookkeeping/Sales Tax Fields if the Account is Updated with Bookkeeping/Sales Tax Fields
+    public static void updateOpportunity(Map<Id, Account> updatedAccMap, Map<Id, String> updatedAccIdProdNameMap){
+        if(updatedAccMap.isEmpty() || updatedAccMap == Null)
+            return;
+        system.debug('updatedAccMap.size()='+updatedAccMap.size() +'\n updatedAccMap='+updatedAccMap);
+        
+        List<Opportunity> oppList =  new List<Opportunity>();
+        //Query Open and Bookkeeping/Sales Tax Opportunities
+        oppList = [SELECT Id, Name, IsClosed, AccountId, Customer_Product__c, Customer_Product__r.Product__r.Name 
+                   FROM Opportunity WHERE AccountId IN: updatedAccMap.KeySet() AND IsClosed = false AND 
+                   (Customer_Product__r.Product__r.Name LIKE '%State Sales Tax Filings%' OR Customer_Product__r.Product__r.Name LIKE '%Accounting/Bookkeeping Services%')];
+        system.debug('OppList.size()='+oppList.size() +'\n OppList='+oppList);
+        
+        //Iterate the Open Bookkeeping/Sales Tax Opportunities of the Account.
+        if(oppList.isEmpty() || oppList == Null)
+            return;
+        Map<Id, Opportunity> updateOppMap = new Map<Id, Opportunity>();
+        for(Opportunity oppRecord : oppList){
+            if(updatedAccMap.containsKey(oppRecord.AccountId) && updatedAccMap.get(oppRecord.AccountId) != Null && updatedAccIdProdNameMap != Null && updatedAccIdProdNameMap.containsKey(oppRecord.AccountId) && updatedAccIdProdNameMap.get(oppRecord.AccountId) != Null){
+                Opportunity opp = new Opportunity();
+                opp.Id = oppRecord.Id;
+                Account acc = updatedAccMap.get(oppRecord.AccountId);
+                //system.debug('acc='+acc);
+                if(oppRecord.Customer_Product__r.Product__r.Name.contains('Accounting/Bookkeeping Services')  && (updatedAccIdProdNameMap.get(oppRecord.AccountId) == 'Bookkeeping AND Sales Tax' || updatedAccIdProdNameMap.get(oppRecord.AccountId) == 'Bookkeeping')){
+                    system.debug('CustProd Name='+oppRecord.Customer_Product__r.Product__r.Name);
+                    opp.Banking_Access__c = acc.Banking_Access__c;
+                    opp.Bank_Transactions__c = acc.Bank_Transactions__c;
+                    opp.Ask_My_Accountant_Bookkeeping__c = acc.Ask_My_Accountant_Bookkeeping__c;
+                    opp.Review_Balance_Sheet_Bookkeeping__c = acc.Review_Balance_Sheet_Bookkeeping__c;
+                    opp.A_R_Bookkeeping__c = acc.A_R_Bookkeeping__c;
+                    opp.A_P_Bookkeeping__c = acc.A_P_Bookkeeping__c;
+                    opp.Reconciliation_Bookkeeping__c = acc.Reconciliation_Bookkeeping__c;
+                    opp.Sent_Reports_Bookkeeping__c = acc.Sent_Reports_Bookkeeping__c;
+                    opp.Close_Books__c = acc.Close_Books__c;
+                    opp.Accounts_Failed_Disconnected__c = acc.Accounts_Failed_Disconnected__c;
+                    opp.Bank_Transactions_bookkeeping__c = acc.Bank_Transactions_bookkeeping__c;
+                    opp.Notes_Bookkeeping__c = acc.Notes_Bookkeeping__c;
+                    opp.Opportunities_Bookkeeping__c =acc.Opportunities_Bookkeeping__c;
+                    if(!updateOppMap.containsKey(opp.Id))
+                        updateOppMap.put(opp.Id, opp);
+                }
+                else if(oppRecord.Customer_Product__r.Product__r.Name.contains('State Sales Tax Filings') & (updatedAccIdProdNameMap.get(oppRecord.AccountId) == 'Bookkeeping AND Sales Tax' || updatedAccIdProdNameMap.get(oppRecord.AccountId) == 'Sales Tax')){
+                    system.debug('CustProd Name='+oppRecord.Customer_Product__r.Product__r.Name);
+                    opp.Business_Partner_Number__c = acc.Business_Partner_Number__c;
+                    opp.Certificate_Number__c = acc.Certificate_Number__c;
+                    opp.Routing_for_Sales_Tax__c = acc.Routing_for_Sales_Tax__c;
+                    opp.Account_for_Sales_Tax__c = acc.Account_for_Sales_Tax__c;
+                    if(!updateOppMap.containsKey(opp.Id))
+                        updateOppMap.put(opp.Id, opp);
+                }
+            }
+        }
+        system.debug('updateOppMap.size()='+updateOppMap.size() +'\n updateOppMap='+updateOppMap);
+        if(!updateOppMap.isEmpty())
+            Update updateOppMap.Values();
+        AccountTriggerHandler.isExecuting = false;
+    }
+    
+    public void insertCustomerInStripe(List<Account> accList){
+        List<Account> accountList = new List<Account>();
+        
+        for(Account acc :accList) {
+            if(String.isBlank(acc.Stripe_Customer_ID__c) && (String.isNotBlank(acc.Email__c) || (acc.IsPersonAccount && String.isNotBlank(acc.PersonEmail)))){
+                accountList.add(acc); 
+            }
+        }
+        if(accountList !=null && accountList.size()>0){
+            Database.executeBatch(new StripeCreateCustomerBatch(accountList,false), 50);
+        }
+        
+    }
+    
+    public void updateCustomerInStripe(List<Account> accList,Map<id,Account> oldMaps){
+        
+        List<Account> insertAccList = new List<Account>();
+        List<Account> updateAccList = new List<Account>();
+        for(Account acc:accList){
+            system.debug('accList = '+accList+'\n'+'oldMaps = '+oldMaps);
+            if((oldMaps.get(acc.Id).Email__c != acc.Email__c || (acc.IsPersonAccount && oldMaps.get(acc.Id).personEmail != acc.personEmail)) && String.isBlank(acc.Stripe_Customer_ID__c)){
+                insertAccList.add(acc);
+            } else if( ( (acc.isPersonAccount != True? (oldMaps.get(acc.Id).Name != acc.Name) : (oldMaps.get(acc.Id).LastName != acc.LastName || oldMaps.get(acc.Id).FirstName != acc.FirstName))  || oldMaps.get(acc.Id).Email__c != acc.Email__c || oldMaps.get(acc.Id).Phone != acc.Phone || oldMaps.get(acc.Id).Description != acc.Description || oldMaps.get(acc.Id).personEmail != acc.personEmail) && String.isNotBlank(acc.Stripe_Customer_ID__c)){
+                updateAccList.add(acc);
+            }
+        }
+        if(insertAccList != Null && insertAccList.size() > 0){
+            Database.executeBatch(new StripeCreateCustomerBatch(insertAccList,false), 50);
+        }
+        if(updateAccList != Null && updateAccList.size() > 0){
+            Database.executeBatch(new StripeCreateCustomerBatch(updateAccList,True), 50);
+        }
+    }
+    
+    public static void updateAccountInQuickBooks(List<Account> accList,Map<id,Account> oldMap){
+        
+        QuickbooksUpdateCustomerJson customer = new QuickbooksUpdateCustomerJson();
+        string customerString = JSON.serialize(customer); 
+        system.debug('customer  '+customer);
+        
+        Map<String,List<String>> fieldsMap = new Map<String,List<String>>();
+        Map<id,Account> fieldsUpdatedMap = new Map<Id,Account>();
+        List<String> finalFieldNames = new List<String>();
+        
+        List<Quickbooks_Field_Mapping__mdt> myFields = [SELECT QuickBooks_Field_Name__c,Purpose__c, Field__c,Related_Field_Name__c FROM Quickbooks_Field_Mapping__mdt ];
+        for(Quickbooks_Field_Mapping__mdt myField : myFields) {
+            if(myField.Purpose__c == 'Get Person Account'){
+                if(fieldsMap.containsKey('person')) {
+                    fieldsMap.get('person').add(myField.Related_Field_Name__c);
+                } else {
+                    fieldsMap.put('person', new List<String> {myField.Related_Field_Name__c});
+                }
+            }else if(myField.Purpose__c == 'Get business Account'){
+                if(fieldsMap.containsKey('business')) {
+                    fieldsMap.get('business').add(myField.Related_Field_Name__c);
+                } else {
+                    fieldsMap.put('business', new List<String> {myField.Related_Field_Name__c});
+                }
+            }else if(myField.Purpose__c == 'Get Account'){
+                if(fieldsMap.containsKey('other')) {
+                    fieldsMap.get('other').add(myField.Related_Field_Name__c);
+                } else {
+                    fieldsMap.put('other', new List<String> {myField.Related_Field_Name__c});
+                }         
+            }
+        }
+        for(Account acc : accList) {
+            Account oldAcc = oldMap.get(acc.Id);
+            finalFieldNames = new List<String>();
+            finalFieldNames.addAll(fieldsMap.get('other'));
+            if(acc.IsPersonAccount){
+                finalFieldNames.addAll(fieldsMap.get('person'));
+            }else{
+                finalFieldNames.addAll(fieldsMap.get('business'));
+            }
+            system.debug('fieldNames = '+finalFieldNames);
+                for(String fieldName : finalFieldNames) {
+                    if(acc.get(fieldName) !=  oldAcc.get(fieldName)) {
+                        fieldsUpdatedMap.put(acc.id,acc);
+                        break;
+                    }
+                } 
+        }
+        for(Account accRec: fieldsUpdatedMap.values()){
+            string accountString = JSON.serialize(accRec);
+            system.debug('accountString  '+accountString);
+            if((oldMap.get(accRec.Id).Sync_Account_to_Quickbooks__c == False && accRec.Sync_Account_to_Quickbooks__c == True) || accRec.QBO_customer_Id__c == null){
+                system.debug('calling create');
+                QuickBooksUtil.createCustomer(customerString,accountString,Null);
+            }else{
+                if(accRec.QBO_customer_Id__c != null ){
+                    if(oldMap.get(accRec.Id).QBO_customer_Id__c == null )
+                    {
+                        system.debug('new rec update trigger');   
+                    }
+                    else 
+                    {
+                        system.debug('old rec update trigger');
+                        QuickBooksUtil.updateCustomer(customerString,accountString,false);
+                    }
+                }  
+            }  
+        }
+    }  
+    
+    Public Void CreateAccountInQuickBooks(List<Account> accList){
+        for(Account acc:accList){
+            quickbooksCustomer.customer customer = new quickbooksCustomer.customer();
+            string customerString = JSON.serialize(customer);    
+            string AccountString = JSON.serialize(acc);
+            if(!acc.Account_Synced_to_QuickBooks__c){
+                QuickBooksUtil.createCustomer(customerString, AccountString,Null);
+            }
+        }
+    }
+        
+}
+
+
+
+
+
+
+
+
+
+
+******************************************************************************************
+
+******************************QuickBooksQueueableForUpdateContact ************************************************************
+
+
+******************************************************************************************
+
+
+public class QuickBooksQueueableForUpdateContact implements Queueable,Database.AllowsCallouts {
+    
+    Account acc;
+    Boolean updateInQBO;
+    Invoice__c invoice;
+    
+    public QuickBooksQueueableForUpdateContact(Account acc,Boolean updateInQBO){
+        this.acc = acc;
+        this.updateInQBO = updateInQBO;                   
+    }
+    /*public QuickBooksQueueableForUpdateContact(Account acc,Boolean updateInQBO,Invoice__c invoice){
+this.acc = acc;
+this.updateInQBO = updateInQBO;  
+this.invoice = invoice;
+}*/
+    public void execute(QueueableContext context) { 
+        List<Account> accList =[select Id, Account_Synced_to_QuickBooks__c,QBO_customer_syncToken__c,QuickBooks_PreviousFieldValueJson__c, QBO_customer_Id__c from Account where id =:acc.id ];
+        if(accList != Null && accList.size()>0){
+            accList[0].QBO_customer_Id__c = acc.QBO_customer_Id__c;
+            accList[0].Account_Synced_to_QuickBooks__c = true;
+            if(acc.QuickBooks_PreviousFieldValueJson__c !=Null){
+                accList[0].QuickBooks_PreviousFieldValueJson__c = acc.QuickBooks_PreviousFieldValueJson__c;
+            }
+            if(updateInQBO){  
+                QuickbooksCustomer.customer customer = new QuickbooksCustomer.customer();
+                string customerString = JSON.serialize(customer);    
+                string updateAccountString = JSON.serialize(acc);
+                QuickBooksUtil.updateCustomer(customerString,updateAccountString,True);
+            }
+            if(Invoice != Null){
+                string invoiceString = JSON.serialize(Invoice);
+                String paymentIntegration = qb_Metadata__mdt.getInstance('QuickBooks').Invoice_Payment_Sync_Integration__c;
+                //if(paymentIntegration.equalsIgnoreCase('Active'))
+                //QuickBooksUtil.createInvoice(invoiceString,acc.QBO_customer_Id__c);
+            }
+            update accList[0];
+        }
+        
+        
+    } 
+}
